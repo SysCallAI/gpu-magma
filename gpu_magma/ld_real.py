@@ -250,12 +250,12 @@ class RealLDGeneTest:
                 ref_idx = np.array(ref_idx)
                 gwas_matched = np.array(gwas_matched)
 
-                # Truncate large genes
+                # Truncate large genes — evenly spaced thinning by position
                 if len(ref_idx) > self.max_snps:
-                    p_subset = snp_pvalues[gwas_matched]
-                    top_k = np.argsort(p_subset)[:self.max_snps]
-                    ref_idx = ref_idx[top_k]
-                    gwas_matched = gwas_matched[top_k]
+                    step = len(ref_idx) / self.max_snps
+                    keep = np.round(np.arange(self.max_snps) * step).astype(int)
+                    ref_idx = ref_idx[keep]
+                    gwas_matched = gwas_matched[keep]
 
                 z_gene = z_all[gwas_matched]
                 R = self.ld.compute_ld_matrix(ref_idx)

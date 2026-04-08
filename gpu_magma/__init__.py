@@ -6,18 +6,18 @@ in PyTorch for gene-level association testing on GPU.
 
 Core algorithm per gene:
   1. Map SNPs to gene regions (positional window)
-  2. Extract z-scores from GWAS p-values
-  3. Compute LD correlation matrix from reference genotypes
-  4. Eigendecompose LD matrix, threshold near-zero eigenvalues
-  5. Project z-scores into eigenspace (whitened decorrelation)
-  6. Compute chi-squared test statistic and gene-level p-value
+  2. Extract z-scores from GWAS p-values: z = Phi^{-1}(1 - p/2)
+  3. Compute LD correlation matrix R from reference genotypes
+  4. Test statistic: T = sum(z_i^2)
+  5. LD-adjusted variance via Brown's method: Var[T] = 2 * trace(R^2)
+  6. Satterthwaite approximation: T ~ c * chi2(m), p-value from CDF
 
-GPU advantage: Steps 3-6 leverage GPU-accelerated linear algebra
-(eigendecomposition, matrix multiply) for each gene.
+GPU advantage: Steps 3-5 leverage GPU-accelerated matrix multiply and
+Frobenius norm computation for each gene.
 
-Note: GPU-MAGMA uses a whitened chi-squared test (decorrelation + unweighted
-sum), which differs from MAGMA v1.08+'s weighted chi-squared with Imhof's
-method. Both are valid approaches; see README for details.
+Note: GPU-MAGMA uses Brown's method (Satterthwaite chi-squared approximation)
+which differs from MAGMA v1.08+'s weighted chi-squared with Imhof's method.
+Both are valid approaches; see README for details.
 """
 
 __version__ = "0.1.0"

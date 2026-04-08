@@ -43,19 +43,23 @@ def gene_test_single(
     eigenvalue_threshold: float,
     device: torch.device,
 ) -> tuple[float, float, int]:
-    """Gene-level test for a single gene (whitened chi-squared).
+    """Gene-level test for a single gene (Brown's method / MAGMA mean model).
+
+    Works with chi-squared statistics (z^2) directly, adjusting for LD via
+    the Frobenius norm of the correlation matrix. This correctly handles
+    two-sided (unsigned) z-scores from GWAS p-values.
 
     Algorithm:
-      1. Regularize: R_reg = R + threshold * I
-      2. Eigendecompose: R_reg = U Lambda U^T
-      3. Threshold: keep eigenvalues > threshold
-      4. Project: W = Lambda^{-1/2} U^T Z
-      5. Test stat: T = sum(W^2)
-      6. Under null: T ~ chi2(m) where m = n_retained_eigenvalues
-      7. P-value from chi-squared survival function (GPU-native)
+      1. T = sum(z_i^2)             — sum of chi-squared(1) statistics
+      2. E[T] = k                   — expected value under null
+      3. Var[T] = 2 * trace(R^2)    — LD-adjusted variance (Brown 1975)
+      4. Satterthwaite approximation: T ~ c * chi2(m) where
+           c = trace(R^2) / k
+           m = k^2 / trace(R^2)      — effective number of independent SNPs
+      5. p = P(chi2(m) > T/c)
 
     Returns:
-        (test_statistic, p_value, n_effective_eigenvalues)
+        (test_statistic, p_value, n_effective)
     """
     k = len(z_scores)
 
@@ -64,39 +68,25 @@ def gene_test_single(
 
     if k == 1:
         chi2_val = z_scores[0].item() ** 2
-        # chi2 SF for df=1 on GPU
         dist = torch.distributions.Chi2(torch.tensor(1.0, device=device))
         p = 1.0 - dist.cdf(torch.tensor(chi2_val, device=device)).item()
         return chi2_val, p, 1
 
-    # Regularize LD matrix
-    ld_reg = ld_matrix + eigenvalue_threshold * torch.eye(
-        k, device=device, dtype=ld_matrix.dtype
-    )
+    # Test statistic: sum of squared z-scores
+    test_stat = (z_scores ** 2).sum()
 
-    # Eigendecomposition on GPU
-    eigenvalues, eigenvectors = torch.linalg.eigh(ld_reg)
+    # LD-adjusted variance via Frobenius norm: trace(R^2) = ||R||_F^2
+    trace_R2 = (ld_matrix ** 2).sum()
 
-    # Threshold eigenvalues
-    mask = eigenvalues > eigenvalue_threshold
-    n_effective = int(mask.sum().item())
+    # Satterthwaite approximation parameters
+    c = trace_R2 / k                     # scaling factor
+    n_effective = int(round((k * k / trace_R2).item()))  # effective df
+    n_effective = max(n_effective, 1)
 
-    if n_effective == 0:
-        return 0.0, 1.0, 0
-
-    eigenvalues = eigenvalues[mask]
-    eigenvectors = eigenvectors[:, mask]
-
-    # Project z-scores into eigenspace
-    projected = eigenvectors.T @ z_scores
-    weighted = projected / torch.sqrt(eigenvalues)
-
-    # Test statistic
-    test_stat = (weighted ** 2).sum()
-
-    # P-value from chi-squared (GPU-native, no scipy)
-    dist = torch.distributions.Chi2(torch.tensor(float(n_effective), device=device))
-    p_value = (1.0 - dist.cdf(test_stat)).item()
+    # P-value: P(chi2(m) > T/c)
+    m = torch.tensor(float(n_effective), device=device)
+    dist = torch.distributions.Chi2(m)
+    p_value = (1.0 - dist.cdf(test_stat / c)).item()
 
     return float(test_stat.item()), p_value, n_effective
 

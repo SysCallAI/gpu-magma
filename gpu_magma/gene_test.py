@@ -1,18 +1,16 @@
 """
 GPU-accelerated gene-level association test.
 
-Reimplements MAGMA gene analysis (de Leeuw et al., 2015):
-  - Mean model: tests whether the mean chi-squared across SNPs in a gene
-    exceeds expectation under the null, accounting for LD.
-  - Uses eigendecomposition of the LD matrix to decorrelate SNP
-    test statistics before computing the gene-level test.
+Inspired by MAGMA gene analysis (de Leeuw et al., 2015):
+  - Mean model: tests whether the sum of chi-squared statistics across
+    SNPs in a gene exceeds expectation under the null, accounting for LD.
+  - Uses Brown's method (Satterthwaite approximation) to adjust the
+    chi-squared reference distribution for LD correlation.
 
 The key GPU operations:
-  1. Batched eigendecomposition (torch.linalg.eigh) across all genes
-  2. Batched matrix projections (z-scores into eigenspace)
-  3. Vectorized p-value computation from F-distribution
-
-On A100: ~20K genes complete in seconds.
+  1. LD matrix computation via batched matrix multiply (G^T G)
+  2. Frobenius norm for LD-adjusted variance (trace(R^2))
+  3. Vectorized p-value computation from chi-squared distribution
 """
 
 import torch
@@ -107,12 +105,12 @@ class GeneTestGPU:
                 ref_idx = gwas_idx
                 gwas_matched = gwas_idx
 
-            # Truncate large genes — keep smallest p-values
+            # Truncate large genes — evenly spaced thinning by position
             if len(ref_idx) > self.max_snps_per_gene:
-                p_subset = snp_pvalues[gwas_matched]
-                top_k = np.argsort(p_subset)[:self.max_snps_per_gene]
-                ref_idx = ref_idx[top_k]
-                gwas_matched = gwas_matched[top_k]
+                step = len(ref_idx) / self.max_snps_per_gene
+                keep = np.round(np.arange(self.max_snps_per_gene) * step).astype(int)
+                ref_idx = ref_idx[keep]
+                gwas_matched = gwas_matched[keep]
 
             z_gene = z_all[gwas_matched]
             ld_matrix = self.ld.compute_ld_matrix(ref_idx)
