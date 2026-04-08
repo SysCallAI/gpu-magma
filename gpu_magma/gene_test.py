@@ -138,6 +138,12 @@ class GeneTestGPU:
             sig = sum(1 for r in results if r.p_value < 2.5e-6)
             print(f"  Genome-wide significant (p < 2.5e-6): {sig} genes")
 
+        if not results:
+            return pd.DataFrame(columns=[
+                "gene_id", "gene_name", "chr", "start", "end",
+                "n_snps", "n_effective", "stat", "p", "z",
+            ])
+
         df = pd.DataFrame([{
             "gene_id": r.gene_id,
             "gene_name": r.gene_name,

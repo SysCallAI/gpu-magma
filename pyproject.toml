@@ -34,6 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 plink = ["pandas-plink>=2.0"]
 all = ["pandas-plink>=2.0", "requests>=2.28", "huggingface-hub>=0.20"]
+test = ["pytest>=7.0", "scipy>=1.10"]
 
 [project.urls]
 Homepage = "https://github.com/SysCallAI/gpu-magma"
@@ -42,3 +43,7 @@ Issues = "https://github.com/SysCallAI/gpu-magma/issues"
 
 [tool.setuptools.packages.find]
 include = ["gpu_magma*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
