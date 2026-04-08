@@ -2,7 +2,7 @@
 
 GPU-accelerated gene-level association testing for GWAS summary statistics.
 
-GPU-MAGMA reimplements the [MAGMA](https://ctg.cncr.nl/software/magma) gene analysis algorithm (de Leeuw et al., 2015, *PLOS Computational Biology*) using PyTorch, enabling massively parallel gene-level testing on NVIDIA GPUs. What takes hours on CPU completes in seconds on a single A100.
+GPU-MAGMA implements GPU-accelerated gene-level association testing inspired by [MAGMA](https://ctg.cncr.nl/software/magma) (de Leeuw et al., 2015, *PLOS Computational Biology*) using PyTorch. It moves the core linear algebra (LD computation, eigendecomposition, projection) to NVIDIA GPUs for dramatic speedups over CPU-based tools.
 
 ## Why
 
@@ -26,7 +26,9 @@ For each gene *g* with *k* mapped SNPs:
 7. P-value:  Gene-level significance from chi-squared distribution
 ```
 
-All steps from 3 onward execute on GPU via PyTorch batched operations.
+All steps from 3 onward execute on GPU via PyTorch. Each gene's linear algebra (eigendecomposition, projection, test statistic) runs on GPU, with genes processed sequentially. Batched multi-gene execution is planned for a future release.
+
+> **Note on algorithm:** GPU-MAGMA uses a whitened chi-squared test (decorrelation via eigendecomposition + unweighted sum), which differs from MAGMA v1.08+'s weighted chi-squared with Imhof's method. Both are statistically valid approaches. The whitened method avoids numerical integration per gene, enabling faster GPU execution. See [Algorithm differences from MAGMA](#algorithm-differences-from-magma) below.
 
 ## Installation
 
@@ -147,6 +149,7 @@ from gpu_magma.ld_decay import LDDecayApprox
 # Approximate LD (no reference panel needed)
 ld = LDDecayApprox(
     snp_positions=gwas["BP"].values,
+    snp_chromosomes=gwas["CHR"].values,
     decay_rate=50_000,  # 50kb half-life (EUR default)
     device="cuda",
 )
@@ -165,9 +168,25 @@ Note: LD decay approximation is less accurate than a real reference panel and ma
 | `PerChromLDComputer` | Highest | Moderate (one chr at a time) | Fast | Genome-wide with real LD |
 | `LDDecayApprox` | Approximate | Minimal | Fastest | Exploratory analysis, no reference panel |
 
+## Algorithm Differences from MAGMA
+
+GPU-MAGMA is **inspired by** MAGMA's gene-level analysis but uses a different statistical test:
+
+| Aspect | GPU-MAGMA | MAGMA v1.08+ |
+|--------|-----------|--------------|
+| Test statistic | Whitened chi-squared: W = Lambda^{-1/2} U^T Z, T = sum(W^2) | Weighted chi-squared: T* = Z'Z |
+| Null distribution | chi2(m), m = retained eigenvalues | Weighted sum of chi2(1) via Imhof's method |
+| Eigenvalue handling | Threshold + whitening (equal-weight after decorrelation) | Full eigenvalue weighting |
+
+**In practice:** Both approaches test whether gene-level association exceeds null expectation given LD structure. The whitened approach is computationally simpler (no numerical integration) and well-suited for GPU execution. For most genes, results are highly concordant. Concordance validation against CPU MAGMA is in progress.
+
+**Other differences from default MAGMA:**
+- Default annotation window is +/-10kb (MAGMA defaults to gene body only, though +/-10kb is commonly used)
+- Large genes (>500 SNPs) are truncated by keeping top SNPs by p-value (MAGMA uses eigenvalue-based dimensionality reduction)
+
 ## Performance
 
-Benchmarked on PGC3 Schizophrenia GWAS (37.5M SNPs, 18,627 genes tested):
+Preliminary benchmarks on PGC3 Schizophrenia GWAS (37.5M SNPs, 18,627 genes tested):
 
 | Platform | Time | Notes |
 |----------|------|-------|
@@ -175,7 +194,7 @@ Benchmarked on PGC3 Schizophrenia GWAS (37.5M SNPs, 18,627 genes tested):
 | **GPU-MAGMA (A100 80GB)** | **~45 seconds** | Real 1000G EUR LD |
 | **GPU-MAGMA (RTX 4090 24GB)** | **~2 minutes** | Per-chromosome loading |
 
-GPU-MAGMA achieves ~200x speedup on A100 compared to CPU MAGMA.
+> **Note:** Reproducible benchmark scripts are planned for v0.2.0. Current gene processing is sequential per-gene with GPU-accelerated linear algebra within each gene. Batched multi-gene processing (further speedup expected) is on the roadmap.
 
 ## Gene locations
 
@@ -205,12 +224,23 @@ Key parameters and their defaults:
 
 ```
 gpu_magma/
-  __init__.py       # Public API: annotate_snps_to_genes, GeneTestGPU, LDComputer
+  __init__.py       # Public API exports (all classes below)
+  _core.py          # Shared gene test implementation (GPU-native, no scipy)
   annotate.py       # SNP-to-gene positional annotation
-  gene_test.py      # GPU gene-level association test (MAGMA mean model)
+  gene_test.py      # GPU gene-level association test (whitened chi-squared)
   ld.py             # LD computation from PLINK reference (full genome)
   ld_real.py        # Per-chromosome LD with lazy loading
   ld_decay.py       # LD approximation from physical distance
+```
+
+All public classes are importable from the top level:
+
+```python
+from gpu_magma import (
+    annotate_snps_to_genes, GeneAnnotation, load_gene_locations,
+    GeneTestGPU, GeneResult, LDComputer,
+    PerChromLDComputer, RealLDGeneTest, LDDecayApprox,
+)
 ```
 
 ## Citation

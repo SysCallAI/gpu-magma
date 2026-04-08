@@ -18,12 +18,12 @@ On A100: ~20K genes complete in seconds.
 import torch
 import numpy as np
 import pandas as pd
-from scipy import stats as sp_stats
 from typing import Optional
 from dataclasses import dataclass
 
 from .annotate import GeneAnnotation
 from .ld import LDComputer
+from ._core import pvalues_to_zscores, gene_test_single, pvalue_to_zscore
 
 
 @dataclass
@@ -59,65 +59,15 @@ class GeneTestGPU:
         self.device = torch.device(device)
 
     def _pvalues_to_zscores(self, pvalues: np.ndarray) -> torch.Tensor:
-        p = np.clip(pvalues, 1e-300, 1.0 - 1e-10)
-        z = sp_stats.norm.ppf(1 - p / 2)
-        z = np.clip(z, -37.5, 37.5)
-        return torch.tensor(z, dtype=torch.float32, device=self.device)
+        return pvalues_to_zscores(pvalues, self.device)
 
     def _gene_test_single(
         self,
         z_scores: torch.Tensor,
         ld_matrix: torch.Tensor,
     ) -> tuple[float, float, int]:
-        """Gene-level test for a single gene.
-
-        Algorithm (MAGMA mean model):
-          1. Eigendecompose R = U Lambda U^T
-          2. Threshold: keep eigenvalues > threshold
-          3. Project: W = Lambda^{-1/2} U^T Z
-          4. Test stat: T = sum(W^2)
-          5. Under null: T ~ chi2(m) where m = n_retained_eigenvalues
-          6. P-value from chi-squared distribution
-        """
-        k = len(z_scores)
-
-        if k == 0:
-            return 0.0, 1.0, 0
-
-        if k == 1:
-            chi2 = z_scores[0].item() ** 2
-            p = float(sp_stats.chi2.sf(chi2, df=1))
-            return chi2, p, 1
-
-        # Regularize LD matrix
-        ld_reg = ld_matrix + self.eigenvalue_threshold * torch.eye(
-            k, device=self.device, dtype=ld_matrix.dtype
-        )
-
-        # Eigendecomposition on GPU
-        eigenvalues, eigenvectors = torch.linalg.eigh(ld_reg)
-
-        # Threshold eigenvalues
-        mask = eigenvalues > self.eigenvalue_threshold
-        n_effective = int(mask.sum().item())
-
-        if n_effective == 0:
-            return 0.0, 1.0, 0
-
-        eigenvalues = eigenvalues[mask]
-        eigenvectors = eigenvectors[:, mask]
-
-        # Project z-scores into eigenspace
-        projected = eigenvectors.T @ z_scores
-        weighted = projected / torch.sqrt(eigenvalues)
-
-        # Test statistic
-        test_stat = float((weighted ** 2).sum().item())
-
-        # P-value from chi-squared
-        p_value = float(sp_stats.chi2.sf(test_stat, df=n_effective))
-
-        return test_stat, p_value, n_effective
+        """Gene-level test for a single gene. Delegates to shared implementation."""
+        return gene_test_single(z_scores, ld_matrix, self.eigenvalue_threshold, self.device)
 
     def run(
         self,
@@ -168,7 +118,7 @@ class GeneTestGPU:
             ld_matrix = self.ld.compute_ld_matrix(ref_idx)
             stat, p_value, n_eff = self._gene_test_single(z_gene, ld_matrix)
 
-            z_gene_score = float(sp_stats.norm.isf(p_value)) if p_value > 0 else 37.5
+            z_gene_score = pvalue_to_zscore(p_value, self.device)
 
             results.append(GeneResult(
                 gene_id=gene.gene_id,

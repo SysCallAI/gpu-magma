@@ -12,8 +12,12 @@ Fits in A100 80GB with room for gene LD matrices.
 
 import torch
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from typing import Optional
+
+from .annotate import GeneAnnotation
+from ._core import pvalues_to_zscores, gene_test_single, pvalue_to_zscore
 
 
 class PerChromLDComputer:
@@ -176,66 +180,35 @@ class RealLDGeneTest:
         ld_computer: PerChromLDComputer,
         device: str = "cuda",
         max_snps_per_gene: int = 500,
-        eigenvalue_threshold: float = 0.01,
+        eigenvalue_threshold: float = 1e-5,
     ):
         self.ld = ld_computer
         self.device = torch.device(device)
         self.max_snps = max_snps_per_gene
-        self.eig_threshold = eigenvalue_threshold
+        self.eigenvalue_threshold = eigenvalue_threshold
 
-    def _gene_test_single(self, z_scores, ld_matrix):
-        """Same algorithm as GeneTestGPU._gene_test_single."""
-        from scipy import stats as sp_stats
-
-        k = len(z_scores)
-        if k == 0:
-            return 0.0, 1.0, 0
-        if k == 1:
-            chi2 = z_scores[0].item() ** 2
-            p = float(sp_stats.chi2.sf(chi2, df=1))
-            return chi2, p, 1
-
-        ld_reg = ld_matrix + self.eig_threshold * torch.eye(
-            k, device=self.device, dtype=ld_matrix.dtype
-        )
-
-        eigenvalues, eigenvectors = torch.linalg.eigh(ld_reg)
-        mask = eigenvalues > self.eig_threshold
-        n_effective = int(mask.sum().item())
-
-        if n_effective == 0:
-            return 0.0, 1.0, 0
-
-        eigenvalues = eigenvalues[mask]
-        eigenvectors = eigenvectors[:, mask]
-
-        projected = eigenvectors.T @ z_scores
-        weighted = projected / torch.sqrt(eigenvalues)
-        test_stat = float((weighted ** 2).sum().item())
-
-        p_value = float(sp_stats.chi2.sf(test_stat, df=n_effective))
-        return test_stat, p_value, n_effective
+    def _gene_test_single(
+        self,
+        z_scores: torch.Tensor,
+        ld_matrix: torch.Tensor,
+    ) -> tuple[float, float, int]:
+        """Gene-level test for a single gene. Delegates to shared implementation."""
+        return gene_test_single(z_scores, ld_matrix, self.eigenvalue_threshold, self.device)
 
     def run(
         self,
         snp_pvalues: np.ndarray,
-        gene_annotations: list,
+        gene_annotations: list[GeneAnnotation],
         gwas_chr: np.ndarray,
         gwas_bp: np.ndarray,
         verbose: bool = True,
-    ):
+    ) -> pd.DataFrame:
         """Run gene-level test with real LD from per-chromosome reference."""
-        import pandas as pd
-        from scipy import stats as sp_stats
-
         # Step 1: Match GWAS SNPs to reference
         gwas_to_ref = self.ld.match_gwas_to_ref(gwas_chr, gwas_bp)
 
-        # Step 2: Convert p-values to z-scores
-        p = np.clip(snp_pvalues, 1e-300, 1.0 - 1e-10)
-        z_np = sp_stats.norm.ppf(1 - p / 2)
-        z_np = np.clip(z_np, -37.5, 37.5)
-        z_all = torch.tensor(z_np, dtype=torch.float32, device=self.device)
+        # Step 2: Convert p-values to z-scores (GPU-native)
+        z_all = pvalues_to_zscores(snp_pvalues, self.device)
 
         # Step 3: Group genes by chromosome for efficient loading
         chr_genes = {}
@@ -288,7 +261,7 @@ class RealLDGeneTest:
                 R = self.ld.compute_ld_matrix(ref_idx)
                 stat, p_val, n_eff = self._gene_test_single(z_gene, R)
 
-                z_score = float(sp_stats.norm.isf(p_val)) if p_val > 0 else 37.5
+                z_score = pvalue_to_zscore(p_val, self.device)
 
                 results.append({
                     "gene_id": gene.gene_id,
